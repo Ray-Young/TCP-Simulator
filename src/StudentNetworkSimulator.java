@@ -1,4 +1,8 @@
 import java.util.*;
+
+import com.sun.prism.sw.SWMaskTexture;
+
+import java.awt.Window;
 import java.io.*;
 
 public class StudentNetworkSimulator extends NetworkSimulator
@@ -92,8 +96,15 @@ public class StudentNetworkSimulator extends NetworkSimulator
     private int WindowSize;
     private double RxmtInterval;
     private int LimitSeqNo;
-    private int saw;  //stop and wait.
-    private Packet resentP = null;
+    private Packet[] sW;	//sender window
+    private Packet[] rW;	//receiver window
+    private List<Packet> pList = new ArrayList<Packet>();
+    private int seqNum;		//Keep track of sequence number
+    private boolean T;		//To make sure it is allowed to be transmitted or not.
+    private int lastACK;
+    private int lastRCV;
+    private int count;
+    
     // Add any necessary class variables here.  Remember, you cannot use
     // these variables to send messages error free!  They can only hold
     // state information for A or B.
@@ -123,13 +134,29 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void aOutput(Message message)
     {
     	String data = message.getData();
-    	int check = calCheckSum(data);
-		Packet p = new Packet(saw,saw,check,data);
-		resentP = p;
-		toLayer3(0, p);
-		System.out.println(data);
-		System.out.println("Sent packet: "+saw);
-		startTimer(0, RxmtInterval);
+    	int check = calCheckSum(data,seqNum,0);
+    	Packet p = new Packet(seqNum, 0, check, data);
+    	//System.out.println("Upper layer gives message "+seqNum);
+    	pList.add(p);
+    	if(T){
+    		transmit();
+    	}
+    	//set the next sequence number.
+    	if(WindowSize==1){
+    		if(seqNum==0){
+    			seqNum = 1;
+    		}else{
+    			seqNum = 0;
+    		}
+    		T = false;
+    	}else{
+    		if(seqNum<WindowSize-1){
+    			seqNum+=1;
+    		}else{
+    			T = false;
+    			seqNum = 0;
+    		}
+    	}
     }
     
     // This routine will be called whenever a packet sent from the B-side 
@@ -138,21 +165,39 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // sent from the B-side.
     protected void aInput(Packet packet)
     {
-    	int seq = packet.getSeqnum();
     	int ack = packet.getAcknum();
     	int check = packet.getChecksum();
-    	String pay = packet.getPayload();
-    	if(ack == saw){
-    		//toLayer5(pay);
-    		System.out.println("A received ACK: "+ack);
-    		stopTimer(0);
-    		if(saw == 1){
-    			saw = 0;
-    		}
-    		else if(saw == 0){
-    			saw = 1;
-    		}
-    	}
+    	String data = packet.getPayload();
+		if (check == calCheckSum(data,packet.getSeqnum(),ack)) {
+			System.out.println("RECEIVED ACK: " + ack);
+			if (WindowSize == 1) {
+				toLayer5(rW[0].getPayload());
+				clearWindow(sW);
+				clearWindow(rW);
+				if (ack == 1) {
+					lastRCV = -1;
+				}
+				stopTimer(0);
+				T = true;
+			}
+			if (WindowSize > 1) {
+				if (ack == WindowSize - 1) {
+					T = true;
+					for(Packet pkt:rW){
+						String m = pkt.getPayload();
+						toLayer5(m);
+					}
+					System.out.println("--------ACK OF WINDOW " + count + " IS FINISHED------------------------");
+					count++;
+					stopTimer(0);
+					clearWindow(sW);
+					clearWindow(rW);
+					lastRCV = -1;
+				}
+			}
+		}else{
+			System.out.println("ACK GETS CORRUPTED");
+		}
     }
     
     // This routine will be called when A's timer expires (thus generating a 
@@ -161,13 +206,22 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // for how the timer is started and stopped. 
     protected void aTimerInterrupt()
     {
-    	//stopTimer(0);
-    	System.out.println("Time Out!!!");
-    	System.out.println("Resent packet: "+resentP.getSeqnum());
-    	toLayer3(0, resentP);
-    	startTimer(0, RxmtInterval);
+		System.out.println("Time Out!!!");
+		if (WindowSize == 1) {
+			int x = sW[0].getSeqnum();
+			System.out.println("Retransmitting packet " + x);
+			Packet resentP = sW[0];
+			toLayer3(0, resentP);
+		} else {
+			if(lastRCV+1==WindowSize){			//special condition, where the last ack lost.
+				lastRCV=lastRCV-1;
+			}
+			System.out.println("Retransmitting packet " + (lastRCV + 1));
+			Packet resentP = sW[lastRCV + 1];
+			toLayer3(0, resentP);
+		}
+		startTimer(0, RxmtInterval);
     }
-    
     
     // This routine will be called once, before any of your other A-side 
     // routines are called. It can be used to do any required
@@ -175,7 +229,11 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // of entity A).
     protected void aInit()
     {
-    	saw = 0; //start packet number == 0
+    	seqNum = 0;
+    	sW = new Packet[WindowSize];
+    	T = true;
+    	lastACK = -1;
+    	count = 1;
     }
     
     // This routine will be called whenever a packet sent from the B-side 
@@ -185,16 +243,47 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void bInput(Packet packet)
     {
     	int seq = packet.getSeqnum();
-    	int ack = packet.getAcknum();
     	int check = packet.getChecksum();
     	String data = packet.getPayload();
-    	int test = calCheckSum(data);
-    	if(seq == saw&&check == test){
-    		Packet p = new Packet(saw, saw, check);
-    		toLayer3(1, p);
-    	}
-    	if(check!=test){
-    		System.out.println("Packet "+saw+" is corrupted!!!");
+    	if(check==calCheckSum(data,seq,packet.getAcknum())){				//Means the packet is not corrupted
+			if (WindowSize == 1) {
+				rW[0] = packet;
+			} else {
+				rW[seq] = packet; 					// add packet to receiver window
+			}
+			if(WindowSize == 1){
+				lastRCV = seq;
+				String back = "RECEIVED TILL PACKET: "+seq;
+				System.out.println(back);
+				data = "ACK";
+				check = calCheckSum(data,0,seq);
+				Packet p = new Packet(0, seq, check, data);
+				toLayer3(1, p); 
+			}
+    		if(WindowSize>1){
+    			if(seq == lastRCV+1){				//receive packet in correct order
+    				lastRCV=checkReceived(rW);		//check received till which packet.
+    				String back = "RECEIVED TILL PACKET: "+lastRCV;
+    				System.out.println(back);
+    				data = "ACK";
+    				check = calCheckSum(data,0,lastRCV);
+    				Packet p = new Packet(0, lastRCV, check, data);
+    				toLayer3(1, p);
+    			}else{								//means packet loss
+    				System.out.println("DETECT PACKET LOSS");
+    				String back = "RECEIVED TILL PACKET: "+lastRCV;
+    				System.out.println(back);
+    				data = "ACK";
+    				check = calCheckSum(data,0,lastRCV);
+    				Packet p = new Packet(0, lastRCV, check, data);
+    				toLayer3(1,p);
+    			}
+    		}
+    		
+    	}else{										//Means the packet is corrupted
+    		System.out.println("DETECT PACKET CORRUPTED");
+    		//Packet p = new Packet(0, lastRCV, 0);
+			//toLayer3(1,p);
     	}
     }
     
@@ -204,20 +293,66 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // of entity B).
     protected void bInit()
     {
-
+    	rW = new Packet[WindowSize];
+    	lastRCV = -1;
     }
 
     // Use to print final statistics
     protected void Simulation_done()
     {
-    	System.out.println("Simulation reaches the end. Done!!!");
-    }	
-
-    private int calCheckSum(String data){
+    	System.out.println("DONE!!!");
+    }
+    
+    private int calCheckSum(String data,int seq,int ack){
     	int check = 0;
     	for(int i=0;i<data.length();i++){
     		check+=(int)data.charAt(i);
     	}
+    	check= check+seq+ack;
     	return check;
     }
+    
+    private void transmit(){
+    	List<Packet> rm = new ArrayList<Packet>();
+    	for(Packet p:pList){
+    		toLayer3(0, p);
+    		System.out.println("SENDING PACKET "+p.getSeqnum());
+    		System.out.println("--------------------");
+    		if(WindowSize==1){
+    			startTimer(0, RxmtInterval);
+    			sW[0]=p;
+    			rm.add(p);
+    			break;
+    		}else{
+    			sW[p.getSeqnum()]=p;
+    			if(p.getSeqnum()==WindowSize-1){
+    				startTimer(0, RxmtInterval);
+    				rm.add(p);
+    				break;
+    			}
+    			rm.add(p);
+    		}
+    		
+    	}
+    	for(Packet p:rm){
+    		pList.remove(p);
+    	}
+    }
+    
+    private int checkReceived(Packet[] window){
+    	int i=0;
+    	for(i=0;i<window.length;i++){
+    		if(window[i]==null){
+    			break;
+    		}
+    	}
+    	return i-1;
+    }
+    
+    private void clearWindow(Packet[] window){
+    	for(int i=0;i<WindowSize;i++){
+    		window[i]=null;
+    	}
+    }
+
 }
